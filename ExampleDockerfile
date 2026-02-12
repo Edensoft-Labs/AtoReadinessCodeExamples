@@ -1,0 +1,98 @@
+# This container contains functionality for running the YourCustomSoftware backend software on demand.
+#
+# Once built, this container can be run with a command line the following:
+#  /usr/bin/docker run \
+#      --volume /path/to/ProgramData/on/host/filesystem:/home/user/ProgramData \
+#      your-custom-software-backend:<TAG> \
+#      --configuration_filepath=/home/user/ProgramData/ProgramOperationConfig.json
+
+# BASE THE IMAGE ON A HARDENED IRON BANK IMAGE.
+# Although our software has historically run on Ubuntu Linux, this U.S. Department of Defense (DoD)
+# Platform One Iron Bank image is based on a hardened Debian installation.
+#
+# Using an image acquired from Iron Bank is very important when seeking to deploy containerized software in the DoD,
+# because cybersecurity hardening measures have already been taken on the base image, and security compliance is
+# continuously verified. Thus, Iron Bank images are expected to dramatically reduce the workload required
+# to obtain Authorization to Operate (ATO) for a software platform. The other main source of hardened images
+# is Chainguard, but they do not seem to publicly state what additional steps must be taken to inherit security
+# controls from their images. Thus, we will use an image from Iron Bank for now.
+#
+# The image is stored locally in this repository, but it must be referred to by its full registry path
+# because the full registry path is embedded in the image metadata.
+FROM registry1.dso.mil/ironbank/opensource/debian/debian:13-slim
+
+# INSTALL DEPENDENCY SOFTWARE.
+RUN \
+    # Updating the APT package list helps ensure the latest packages can be found.
+    apt update --assume-yes && \
+    # Several pieces of third-party software must be installed:
+    # - Git is needed for running git commands as part of the analysis.
+    # - SQLite (and its associated runtime library) must be installed for the Python standard library's sqlite3
+    #   module to load properly. The sqlite3 module is part of Python's standard library but requires this OS-level
+    #   support to function. Without these packages, importing sqlite3 in Python will fail.
+    apt install --assume-yes sqlite3 libsqlite3-0 git && \
+    # Cleaning downloaded packages that are no longer needed helps reduce image size.
+    apt clean
+
+# INSTALL PYTHON 3.12.
+# We use a pre-built Python 3.12 because the Iron Bank Debian 13 base image does not include a package for Python 3.12,
+# and attempting to install an Ubuntu DEB package didn't work either. However, we cannot just go with a different Python version,
+# because our current application backend and third-party Python libraries expect Python 3.12. Upgrading to a different
+# Python version would require significant testing and rebuilding of our Python workflow. Thus, we are sticking with Python 3.12
+# until there is a very good reason to upgrade.
+ADD GeneratedFiles/Python-3.12.12_InstallationArchive.tar.gz /home/user/python3.12
+# Next, we need to tell the container where the shared libraries for this Python installation are. If Python cannot find these
+# shared libraries, it will fail to start. Since this environment variable might be used by other components in the container
+# than just Python, its previous contents must be preserved.
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/home/user/python3.12/lib
+
+# INSTALL THE APPLICATION SCHEDULER.
+# A Python executable ZIP file (also called a "zipapp", with filename extension PYZ) allows the entire application and all of its
+# dependencies to be contained in a single file that can be easily copied into the
+# Docker container. However, Python applications packaged in this way cannot have compiled Python artifacts (especially Linux shared object files)
+# loaded from the zipapp. While technically only the compiled artifacts need to be extracted, least complex solution is simply extracting the
+# entire zipapp to its own directory.
+#
+# While it would have been nice to use the Dockerfile ADD command to extract the zipapp, like we do above to install Python,
+# the ADD command does not work for ZIP files. The documentation at https://docs.docker.com/reference/dockerfile/#adding-local-tar-archives
+# explicitly states that the ADD command only supports the following formats: gzip, bzip2, and xz, and tar. Thus, we must manually
+# extract the contents of this ZIP file. We use ZIP extraction functionality built into the Python standard library to avoid needing to
+# install another ZIP extraction program, like `unzip`. Note that Python's `-m` command-line option, as used below, requests to run a
+# library module as a script. Python does not provide a more self-documenting variant of this command-line option.
+#
+# The zipapp must be copied from the local filesystem to the container in a separate command than extracting it inside the container,
+# which will increase Docker image size due to the unextracted zipapp occupying its own Docker image layer. No workaround was found
+# to permit copying the zipapp and extracting it in one step, as Dockerfile RUN commands execute exclusively inside the container's filesystem.
+COPY GeneratedFiles/YourCustomSoftwareScheduler_Python.pyz /home/user/
+RUN \
+    mkdir --parents /home/user/YourCustomSoftwareScheduler_Python && \
+    /home/user/python3.12/bin/python3.12 -m zipfile --extract /home/user/YourCustomSoftwareScheduler_Python.pyz /home/user/YourCustomSoftwareScheduler_Python && \
+    rm /home/user/YourCustomSoftwareScheduler_Python.pyz
+# Now, make sure the Python installation can find and load all modules associated with the application backend. Since no other
+# Python installation exists in this container, we do not need to preserve any previous contents of this environment variable.
+ENV PYTHONPATH=/home/user/YourCustomSoftwareScheduler_Python
+
+# SET UP AN UNPRIVILEGED USER ACCOUNT FOR RUNNING THE APPLICATION BACKEND.
+# Running containerized applications as non-root users is a critical security best practice
+# explicitly required by DoD STIGs (Security Technical Implementation Guides), among others. By running
+# the application as a non-privileged user, if the application is compromised, the attacker gains only
+# non-privileged user access within the container, not root access. For further security hardening, there
+# is no login shell or password granted to this user.
+RUN useradd --shell /sbin/nologin user && \
+    usermod --lock user && \
+    chown user:user /home/user
+# Next, make any relative paths in the application resolve from this user's home directory. If this is not
+# specified, backend applications will encounter filesystem permission errors.
+WORKDIR /home/user
+# Finally, make all subsequent commands in this Dockerfile and the final container execute as the non-privileged user, not as root.
+USER user
+
+# RUN THE APPLICATION SCHEDULER WHEN THIS CONTAINER RUNS.
+# This program is responsible for running all of the other codebase analytics programs in this container
+# based on request files placed in its input request folder. Users are expected to mount a volume into
+# this container at `/home/user/ProgramData` that contains a config file and other files/folders referenced
+# by the main config file. Because the folder we extracted earlier contains a __main__.py file in its root,
+# the whole application can be invoked just by providing the folder path. Defining this as the entrypoint also
+# lets arguments passed to this container go directly to this script.
+ENTRYPOINT ["/home/user/python3.12/bin/python3.12", "/home/user/YourCustomSoftwareScheduler_Python"]
+

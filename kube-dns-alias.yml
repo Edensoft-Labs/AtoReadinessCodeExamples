@@ -1,0 +1,29 @@
+# Some Big Bang pods (e.g., Loki gateway/NGINX) hard-code the resolver to
+# kube-dns.kube-system.svc.cluster.local. On RKE2 the cluster DNS service has a
+# different name (e.g., rke2-coredns-rke2-coredns), so that hostname does not
+# exist and NGINX fails to start. This manifest creates an alias Service named
+# kube-dns that targets the same CoreDNS pods so those pods can resolve it.
+apiVersion: v1
+kind: Service
+metadata:
+  # Must be "kube-dns" so that kube-dns.kube-system.svc.cluster.local resolves.
+  name: kube-dns
+  # Cluster DNS lives in kube-system; the alias must be in the same namespace.
+  namespace: kube-system
+
+spec:
+  # Must match the pod labels of your actual DNS service (e.g., RKE2 CoreDNS).
+  # Find them with: kubectl -n kube-system describe svc <your-dns-svc-name>
+  selector:
+    k8s-app: kube-dns
+  # Expose the same DNS ports as the real DNS service so the alias is a drop-in.
+  ports:
+    - name: dns
+      port: 53
+      protocol: UDP
+      targetPort: 53
+    - name: dns-tcp
+      port: 53
+      protocol: TCP
+      targetPort: 53
+

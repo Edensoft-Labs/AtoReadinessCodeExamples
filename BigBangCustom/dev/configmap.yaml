@@ -1,0 +1,151 @@
+### START CONTENT COPIED VERBATIM FROM BIG BANG TEMPLATE.
+### See https://repo1.dso.mil/big-bang/customers/template/-/blob/main/gitRepo/dev/configmap.yaml?ref_type=heads.
+### Custom content is further below.
+### Presented here only for ease of reading in context with other files. No additional documentation added.
+
+domain: dev.bigbang.mil
+
+# Uncomment the following settings if using the AWS RKE2 terraform setup
+# istio:
+#   ingressGateways:
+#     public-ingressgateway:
+#       type: "NodePort"
+#       nodePortBase: 30000
+
+flux:
+  interval: 2m
+  rollback:
+    cleanupOnFail: false
+
+kiali:
+  enabled: false
+
+istiod:
+  enabled: true
+
+istioCRDs:
+  enabled: true
+
+istioGateway:
+  enabled: true
+
+monitoring:
+  enabled: true
+  values:
+    prometheus:
+      prometheusSpec:
+        resources:
+          requests:
+            cpu: 200m
+            memory: 1Gi
+
+loki:
+  enabled: true
+  strategy: scalable
+  values:
+    minio:
+      enabled: true
+    write:
+      replicas: 1
+      persistence:
+        size: 2Gi
+      resources:
+        limits:
+          cpu: 200m
+          memory: 400Mi
+        requests:
+          cpu: 200m
+          memory: 400Mi
+    read:
+      replicas: 1
+      persistence:
+        size: 2Gi
+      resources:
+        limits:
+          cpu: 200m
+          memory: 400Mi
+        requests:
+          cpu: 200m
+          memory: 400Mi
+
+promtail:
+  enabled: true
+
+kyverno:
+  enabled: true
+
+kyvernoPolicies:
+  enabled: true
+  # values:
+  #   exclude:
+  #     any:
+  #     # Allows k3d load balancer to bypass policies.
+  #     - resources:
+  #         namespaces:
+  #         - istio-system
+  #         names:
+  #         - svclb-*
+  #   policies:
+  #     restrict-host-path-mount-pv:
+  #       parameters:
+  #         allow:
+  #         - /tmp/allowed
+  #         - /var/lib/rancher/k3s/storage/pvc-*
+
+neuvector:
+  enabled: true
+  values:
+    k3s:
+      enabled: true
+
+addons:
+  metricsServer:
+    enabled: auto
+
+  minioOperator:
+    enabled: true # Minio Operator is required for Loki in default core
+### END CONTENT COPIED VERBATIM FROM BIG BANG TEMPLATE.
+
+# DEFINE THE YOUR CUSTOM SOFTWARE PACKAGES.
+packages:
+  # DEPLOY THE USER-ACCESSIBLE WEB TOOL.
+  yourcustomsoftware:
+    # This package is enabled by default because users need it to access the custom software web tool.
+    enabled: true
+
+    # The Helm chart for this package is stored in the same Gitea repo as this environment config (BigBangCustom).
+    # However, it might get put into its own repo later.
+    sourceType: "git"
+    git:
+      repo: https://your-git-server.example/YOUR-ORG/BigBangCustom.git
+      tag: ""
+      branch: "master"
+      path: "chart/your-custom-software"
+      existingSecret: "private-git"
+
+    namespace:
+      # We keep the frontend web application in its own namespace to create a clean boundary between the user-facing surface area
+      # and backend/data services. This helps with least-privilege RBAC, makes network policy/Istio authorization rules easier to
+      # reason about, and reduces blast radius if a public-facing component is misconfigured or compromised. This separation is generally
+      # easier to justify and maintain for a DoW ATO posture as the system grows.
+      name: yourcustomsoftware
+      create: true
+
+    flux:
+      # Flux reconciliation settings for this package, since Big Bang uses Flux under the hood. These values were chosen as sensible defaults
+      # during our initial experimentation. They can definitely be tweaked later.
+      #
+      # The timeout specifies max amount of time Flux will allow a single Helm install/upgrade action to run
+      # before declaring it failed (ex. "context deadline exceeded"). Note that stateful installs (PVC provisioning,
+      # slow image pulls) may require higher timeouts.
+      timeout: 10m
+      # The interval specifies How often Flux re-checks/reconciles this package (pulls chart source + applies changes).
+      # Shorter intervals converge faster but create more controller churn/noise.
+      interval: 5m
+
+    dependsOn:
+      # Istio is required because our app-owned Elasticsearch is deployed into the service mesh environment
+      # (mTLS, sidecar injection, and related network/policy resources depend on Istio being installed).
+      - name: istiod
+        namespace: bigbang
+

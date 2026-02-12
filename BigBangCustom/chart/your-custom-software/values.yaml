@@ -1,0 +1,215 @@
+# The Helm chart for the custom software application.
+
+image:
+  # The YourCustomSoftware container image should be pulled from this Big Bang cluster.
+  registry: harbor.your-domain.example
+  repository: your-org/your-custom-software
+  # This controls when Big Bang attempts to pull the image. Currently, it is set to pull the image anew on every pod start,
+  # which has proven very useful for development when you might re-push the same image tag and want changes immediately.
+  # However, `IfNotPresent` is usually preferred in production to to reduce registry traffic and avoid surprise changes if tags
+  # happen to be reused (which is not a recommended practice in production anyway). This setting only pulls if the image is not
+  # already present on the node.
+  pullPolicy: Always
+  tag: "1.0.0.0"
+# We need credentials to access the Harbor instance of this Big Bang cluster.
+imagePullSecrets:
+  - name: private-registry
+
+# This controls how many identical pod replicas Kubernetes should run for this workload. It is set to one for now
+# since we are only doing local testing and our on-premises testing cluster is resource-limited. Production environments
+# typically use 2+ replicas for high availability, so a single node/pod disruption doesn't take the service down.
+replicaCount: 1
+
+# A Kubernetes ServiceAccount is the in-cluster identity your pods run as. It’s what the pod’s processes use when they talk to the
+# Kubernetes API (and it's also commonly used as the "identity handle" for RBAC rules and for cloud, Istio, Kyverno integrations).
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Applies default security settings at the pod level (and can be overridden per-container). These defaults are chosen to be compatible
+# with hardened/Kubernetes Pod Security Standards environments.
+podSecurityContext:
+  # Enforces that the container does not run as root (UID 0). This is a common baseline control in
+  # hardened clusters and helps reduce impact if the container is compromised.
+  runAsNonRoot: true
+  # Sets the default UID/GID for container processes. We use `1000` as a conventional,
+  # non-root user/group id that works well when images create an application user (or when the process does not
+  # strictly require a specific UID).
+  runAsUser: 1000
+  runAsGroup: 1000
+  # Sets a supplemental group applied to mounted volumes so files are group-owned/readable/writable by
+  # the pod’s processes. This is often needed when the container runs as non-root but still needs to write to
+  # mounted PVCs/emptyDir volumes (Kubernetes can chmod/chgrp the volume contents on mount).
+  fsGroup: 1000
+
+# Applies security settings at the *container* level. These are common hardening defaults that reduce the privileges available inside
+# the container while still supporting typical web workloads.
+securityContext:
+  # Prevents processes from gaining more privileges than their parent process (e.g., via setuid/setgid binaries). This is a key control for least-privilege.
+  allowPrivilegeEscalation: false
+  # Removes all Linux capabilities from the container. Most applications do not need any extra capabilities beyond the default Linux permission model.
+  capabilities:
+    drop:
+      - ALL
+  # Mounts the container’s root filesystem read-only. This blocks many classes of attacks that rely on writing binaries/config into the
+  # image filesystem at runtime. Operationally, the app must write to mounted volumes (or ephemeral writable paths) instead of writing into the image layer.
+  readOnlyRootFilesystem: true
+  # Reinforces non-root execution at the container level (even if pod defaults are overridden elsewhere). UID 1000 is used as a conventional non-root user id.
+  runAsNonRoot: true
+  runAsUser: 1000
+
+resources:
+  # The maximum CPU/memory the container is allowed to use at runtime.
+  limits:
+    # Enforce 1000m = 1 vCPU (millicores). Above this, the container will be throttled.
+    cpu: 1000m
+    # If the container exceeds this, it is likely to be OOMKilled.
+    memory: 2Gi
+
+  # The guaranteed minimum CPU/memory the scheduler reserves for the pod.
+  # Kubernetes uses this to decide which node the pod can fit on.
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+# A liveness probe tells Kubernetes whether the container is still "alive" (not deadlocked/hung). If the liveness probe fails
+# too many times, Kubernetes restarts the container.
+livenessProbe:
+  # Probe liveness by trying to open a TCP connection to port 8000 on the container. The test passes if something is listening
+  # and accepting connections; it fails otherwise. Since our web server application listens on this port, this was judged a reasonable test.
+  tcpSocket:
+    port: 8000
+  # Wait after container start before probing, to make sure it has time to boot.
+  initialDelaySeconds: 10
+  # Probe for liveness once in this many seconds.
+  periodSeconds: 60
+  # Restart the pod only after this many consecutive failures.
+  failureThreshold: 6
+
+# A readiness probe tells Kubernetes whether the container is ready to receive traffic. If the readiness probe fails,
+# Kubernetes keeps the pod out of Service endpoints (and, in an Istio environment, it helps prevent routing to an unready pod).
+# Unlike liveness, readiness failures do NOT restart the container; they only affect traffic routing.
+readinessProbe:
+  # Probe readiness by trying to open a TCP connection to port 8000 on the container. The test passes if something is listening
+  # and accepting connections; it fails otherwise.
+  tcpSocket:
+    port: 8000
+  # Wait after container start before probing, to make sure it has time to boot.
+  initialDelaySeconds: 10
+  # Probe for readiness rather frequently so traffic can be routed quickly after startup/recovery.
+  periodSeconds: 20
+  # Mark the pod unready only after this many consecutive failures.
+  failureThreshold: 6
+
+service:
+  # Expose YourCustomSoftware on an internal-only virtual IP reachable inside the cluster External access (from users) is handled separately
+  # via Istio `VirtualService` / gateway configuration below.
+  type: ClusterIP
+  # The port clients connect to on the Service (stable, virtual port).
+  port: 8000
+  # The port on the target pods/containers that receives the traffic. Usually, this matches the container listen port.
+  targetPort: 8000
+  # Attempts to send repeat requests from the same client IP to the same pod. This is currently required for YourCustomSoftware since YourCustomSoftware
+  # keeps session state in its own memory. We currently do not have a mechanism for multiple YourCustomSoftware containers to share this state.
+  # So if a client changes to a different pod, they will have to log in again.
+  sessionAffinity: ClientIP
+
+istio:
+  # Enable Istio service mesh integration for this chart. In Big Bang, workloads are expected to run
+  # inside the service mesh with automatic sidecar injection. This enables mTLS between pods, traffic
+  # observability, and policy enforcement.
+  enabled: true
+  mtls:
+    # Enforce mutual TLS (mTLS) for in-mesh traffic to this workload. In STRICT mode, ONLY mTLS traffic
+    # is allowed; plaintext connections are rejected. This ensures all pod-to-pod communication is encrypted
+    # and authenticated, satisfying encryption-in-transit requirements.
+    mode: STRICT
+  virtualService:
+    # Create an Istio VirtualService to route HTTP(S) traffic from the gateway to this service. This is required in Big Bang.
+    enabled: true
+    gateways:
+      # Define the Istio Gateways that accept external traffic for this host. Big Bang uses the shared `public-ingressgateway` for user-facing
+      # access with TLS termination at the gateway.
+      - istio-gateway/public-ingressgateway
+    hosts:
+      # External DNS hostnames that should route to this service.
+      - yourcustomsoftware.your-domain.example
+
+networkPolicies:
+  # Enable Kubernetes NetworkPolicies for this chart, so the chart can restrict inbound/outbound
+  # traffic to a least-privilege set. This is very helpful for hardened environments.
+  enabled: true
+  ingressLabels:
+    # The ingress sources that are allowed to reach this workload. This allows traffic only from the Istio ingress gateway pods,
+    # which typically carry `istio: ingressgateway`.
+    istio: ingressgateway
+
+monitoring:
+  # When enabled, the chart typically creates the necessary annotations or ServiceMonitor/PodMonitor resources
+  # so Prometheus can scrape metrics from this workload (assuming the app exposes a metrics endpoint).
+  enabled: false
+
+autoscaling:
+  # When enabled, adjust the replica count based on metrics, instead of keeping replicas fixed.
+  # This is not currently enabled because we don't need it for our local testing. The succeeding values are just
+  # sensible defaults, but they are not used since autoscaling is disabled.
+  enabled: false
+  # Lower bound for autoscaling (minimum number of replicas the HPA will keep running).
+  minReplicas: 1
+  # Upper bound for autoscaling (maximum number of replicas the HPA will scale up to).
+  maxReplicas: 1
+  # Target average CPU utilization percentage across pods. If average CPU goes above this target, HPA scales up;
+  # if it stays below (with some stabilization), HPA scales down.
+  targetCPUUtilizationPercentage: 80
+
+appSettings:
+  # YourCustomSoftware currently expects to get its runtime configuration from `appsettings.json`.
+  # Rather than duplicating that complex structure as Helm values, we provide the file via a Kubernetes Secret.
+  # This secret is mounted into the container filesystem as a normal file for the application to read at startup.
+  #
+  # To create or update the secret, you can do the following:
+  #   ```
+  #   kubectl create secret generic yourcustomsoftware-appsettings -n yourcustomsoftware --from-file=appsettings.json=/path/on/host/filesystem/to/appsettings.json
+  #   ```
+  #
+  # To verify the secret contains the expected file contents, you can do the following:
+  #   ```
+  #   kubectl get secret yourcustomsoftware-appsettings -n yourcustomsoftware -o jsonpath='{.data.appsettings\.json}' | base64 -d
+  #   ```
+  #
+  # The secret name/key here must match the `kubectl create secret ...` command above.
+  existingSecret: "yourcustomsoftware-appsettings"
+  existingSecretKey: "appsettings.json"
+
+# YourCustomSoftware connects to our application-owned Elasticsearch over TLS. To validate Elasticsearch's server certificate,
+# the application needs the Elasticsearch HTTP CA certificate available in the pod.
+elasticsearchCA:
+  # Always reference an existing secret rather than creating a new secret, which is preferred for hardened environments.
+  # In our environment this is synced (cloned) from the `your-elasticsearch` namespace by Kyverno because operator-generated
+  # secrets are namespace-scoped.
+  createSecret: false
+  existingSecret: "your-es-http-certs-public"
+  # Key within the secret that contains the PEM-encoded CA cert.
+  existingSecretKey: "ca.crt"
+  # Inline PEM-encoded CA certificate
+  certificate: ""
+
+volumes:
+  # Define volumes for writable directories. Because the container runs with a read-only root filesystem, we must explicitly provide
+  # writable directories using `emptyDir` volumes. These are ephemeral (cleared when the pod is rescheduled).
+  # Writable directory runtime temp files.
+  - name: tmp
+    emptyDir: {}
+
+  # Writable log directory.
+  - name: logs
+    emptyDir: {}
+
+volumeMounts:
+  # Attach the named volumes above into the container filesystem at specific paths.
+  - name: tmp
+    mountPath: /tmp
+
+  - name: logs
+    mountPath: /var/log

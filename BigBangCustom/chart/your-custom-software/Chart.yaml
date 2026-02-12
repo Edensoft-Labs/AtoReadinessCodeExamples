@@ -1,0 +1,31 @@
+# The Helm chart for the custom software application.
+
+# DEFINE THE API VERSION.
+# The schema version for this chart metadata file, not your app's API version and not Kubernetes’ apiVersion for resources.
+# v2 means this chart uses the Helm 3 chart format. It enables/standardizes Helm 3-era metadata features (like a richer dependencies model, library charts, etc.).
+apiVersion: v2
+
+# DEFINE THE CHART VERSION.
+# The version number of this chart itself (note that this is different from the software version below).
+version: 1.0.1
+
+# DEFINE THE CHART NAME.
+# The name of this chart itself, not the Kubernetes app name and not the Helm release name.
+name: your-custom-software
+
+# DEFINE THE APPLICATION TYPE.
+# The type has two common values:
+# - application: A chart that deploys an app/workload (Deployments, Services, Ingress, etc.). This is the default/most common.
+# - library: A chart that does not deploy resources by itself; it provides shared templates/helpers for other charts to reuse (consumed via dependencies).
+# The custom software deployed in this chart is clearly an application.
+type: application
+
+# DEFINE THE APPLICATION VERSION AND METADATA.
+# The version number of our custom software contained in the custom software containers referenced in this chart.
+# This should match the version number encoded in those containers.
+appVersion: "1.0.0.0"
+# Metadata that might be helpful for locating our containers in a Big Bang deployment, where other software might be deployed alongside ours.
+description: Custom Software
+maintainers:
+  - name: Custom Software
+    email: info@example.com
